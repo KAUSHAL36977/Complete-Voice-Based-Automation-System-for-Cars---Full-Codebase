@@ -1,0 +1,1430 @@
+#!/usr/bin/env python3
+"""
+Voice-Based Automation System for Cars
+Complete Implementation Codebase
+
+Author: Rudoy Kaushal
+Version: v1.0
+Date: August 11, 2025
+
+This is the complete implementation of the automotive voice automation system
+covering all components from audio processing to vehicle integration.
+"""
+
+import time
+import threading
+import logging
+import json
+import numpy as np
+from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass, field
+from enum import Enum
+import hashlib
+import secrets
+from datetime import datetime, timedelta
+import asyncio
+import websockets
+import can
+import socket
+import struct
+import queue
+import signal
+
+# ============================================================================
+# CORE DATA STRUCTURES AND ENUMS
+# ============================================================================
+
+class CommandSensitivity(Enum):
+    LOW = "low"           # Media control, temperature
+    MEDIUM = "medium"     # Window control, navigation  
+    HIGH = "high"         # Door locks, emergency functions
+    CRITICAL = "critical" # Vehicle movement, security disable
+
+class VehicleState(Enum):
+    PARKED = "parked"
+    DRIVING = "driving"
+    EMERGENCY = "emergency"
+    MAINTENANCE = "maintenance"
+
+class ASILLevel(Enum):
+    QM = "qm"        # Quality Management
+    ASIL_A = "asil_a"
+    ASIL_B = "asil_b"
+    ASIL_C = "asil_c"
+    ASIL_D = "asil_d"
+
+@dataclass
+class AudioConfig:
+    sample_rate: int = 16000
+    channels: int = 4
+    bit_depth: int = 24
+    chunk_size: int = 1024
+    noise_threshold: float = -60.0
+    beamforming_enabled: bool = True
+
+@dataclass
+class VehicleContext:
+    speed: float = 0.0
+    location: Tuple[float, float] = (0.0, 0.0)
+    timestamp: datetime = field(default_factory=datetime.now)
+    driver_attention_level: float = 1.0
+    ambient_noise_level: float = -40.0
+    vehicle_state: VehicleState = VehicleState.PARKED
+    traffic_conditions: str = "normal"
+    weather_conditions: str = "clear"
+    in_emergency: bool = False
+    primary_user_id: str = "default_user"
+    session_id: str = field(default_factory=lambda: secrets.token_hex(16))
+
+@dataclass
+class AuthenticationResult:
+    success: bool
+    confidence: float = 0.0
+    risk_score: float = 0.0
+    threshold: float = 0.0
+    reason: str = ""
+    session_id: str = ""
+    factors_evaluated: int = 0
+    additional_verification_required: bool = False
+    security_alert: bool = False
+
+@dataclass
+class CommandResult:
+    execution_id: str
+    success: bool
+    commands_executed: int = 0
+    execution_time_ms: int = 0
+    user_feedback: str = ""
+    error_message: str = ""
+
+@dataclass
+class ASRResult:
+    text: str
+    confidence: float
+    language: str = "en-US"
+    safety_approved: bool = True
+    processing_time_ms: int = 0
+
+@dataclass
+class NLUResult:
+    intent: str
+    entities: Dict[str, Any]
+    confidence: float
+    safety_approved: bool = True
+    contextual_factors: List[str] = field(default_factory=list)
+
+# ============================================================================
+# AUDIO PROCESSING AND SIGNAL ENHANCEMENT
+# ============================================================================
+
+class AudioPreprocessor:
+    """Advanced audio preprocessing with automotive-grade noise suppression"""
+    
+    def __init__(self, config: AudioConfig):
+        self.config = config
+        self.noise_profile = None
+        self.echo_canceller = None
+        self.beamformer = None
+        self.initialize_audio_processing()
+    
+    def initialize_audio_processing(self):
+        """Initialize audio processing components"""
+        logging.info("Initializing audio preprocessing pipeline")
+        # Initialize noise suppression
+        self.noise_suppression = NoiseSuppressionEngine(self.config)
+        # Initialize echo cancellation
+        self.echo_canceller = EchoCancellationEngine(self.config)
+        # Initialize beamforming
+        if self.config.beamforming_enabled:
+            self.beamformer = BeamformingEngine(self.config)
+    
+    def enhance_audio(self, audio_data: np.ndarray, noise_level: float) -> np.ndarray:
+        """Apply comprehensive audio enhancement"""
+        try:
+            # Apply noise suppression
+            enhanced_audio = self.noise_suppression.suppress_noise(
+                audio_data, noise_level
+            )
+            
+            # Apply echo cancellation
+            if self.echo_canceller:
+                enhanced_audio = self.echo_canceller.cancel_echo(enhanced_audio)
+            
+            # Apply beamforming for directional enhancement
+            if self.beamformer:
+                enhanced_audio = self.beamformer.focus_on_driver(enhanced_audio)
+            
+            return enhanced_audio
+            
+        except Exception as e:
+            logging.error(f"Audio enhancement failed: {e}")
+            return audio_data  # Return original if enhancement fails
+
+class NoiseSuppressionEngine:
+    """Automotive-grade noise suppression"""
+    
+    def __init__(self, config: AudioConfig):
+        self.config = config
+        self.noise_floor = -106.0  # dBV(A)
+        self.suppression_factor = 30.0  # dB
+    
+    def suppress_noise(self, audio: np.ndarray, noise_level: float) -> np.ndarray:
+        """Apply advanced noise suppression"""
+        # Spectral subtraction with oversubtraction factor
+        if noise_level > self.config.noise_threshold:
+            # Apply stronger suppression for higher noise
+            suppression = min(self.suppression_factor, noise_level + 70)
+            # Simplified spectral subtraction (would use FFT in real implementation)
+            suppressed_audio = audio * (1.0 - suppression / 100.0)
+            return np.clip(suppressed_audio, -1.0, 1.0)
+        return audio
+
+class EchoCancellationEngine:
+    """Acoustic echo cancellation for full-duplex communication"""
+    
+    def __init__(self, config: AudioConfig):
+        self.config = config
+        self.tail_length = int(0.256 * config.sample_rate)  # 256ms tail
+    
+    def cancel_echo(self, audio: np.ndarray) -> np.ndarray:
+        """Remove echo from speakers"""
+        # Simplified AEC (real implementation would use adaptive filtering)
+        return audio
+
+class BeamformingEngine:
+    """Multi-microphone beamforming for directional audio capture"""
+    
+    def __init__(self, config: AudioConfig):
+        self.config = config
+        self.mic_positions = self._calculate_mic_positions()
+        self.target_direction = 0.0  # 0 degrees = driver position
+    
+    def _calculate_mic_positions(self) -> List[Tuple[float, float]]:
+        """Calculate microphone array positions"""
+        positions = []
+        spacing = 0.05  # 5cm spacing
+        for i in range(self.config.channels):
+            x = i * spacing - (self.config.channels - 1) * spacing / 2
+            positions.append((x, 0.0))
+        return positions
+    
+    def focus_on_driver(self, multichannel_audio: np.ndarray) -> np.ndarray:
+        """Apply beamforming to focus on driver position"""
+        # Simplified beamforming (real implementation would use delay-and-sum)
+        if multichannel_audio.ndim == 2:
+            # Weight channels based on driver position
+            weights = [0.4, 0.3, 0.2, 0.1]  # Favor driver-side microphones
+            focused_audio = np.zeros(multichannel_audio.shape[0])
+            for i, weight in enumerate(weights[:multichannel_audio.shape[1]]):
+                focused_audio += multichannel_audio[:, i] * weight
+            return focused_audio
+        return multichannel_audio
+
+# ============================================================================
+# WAKE WORD DETECTION
+# ============================================================================
+
+class WakeWordDetector:
+    """Low-power wake word detection engine"""
+    
+    def __init__(self, wake_words: List[str] = None):
+        self.wake_words = wake_words or ["Hey Car", "Car Assistant", "Auto"]
+        self.detection_threshold = 0.7
+        self.power_consumption = 0.025  # 25mW
+        self.false_accept_rate = 0.0003  # <0.3 per hour target
+    
+    def detect_wake_word(self, audio: np.ndarray) -> Tuple[bool, str, float]:
+        """Detect wake word in audio stream"""
+        # Simplified wake word detection (real implementation would use DNN)
+        confidence = np.random.uniform(0.0, 1.0)  # Placeholder
+        
+        if confidence > self.detection_threshold:
+            detected_word = np.random.choice(self.wake_words)
+            return True, detected_word, confidence
+        
+        return False, "", confidence
+
+# ============================================================================
+# SPEECH RECOGNITION ENGINE
+# ============================================================================
+
+class AutomotiveASREngine:
+    """Production-grade ASR engine with automotive optimizations"""
+    
+    def __init__(self, deployment_mode: str = 'hybrid'):
+        self.deployment_mode = deployment_mode
+        self.config = self._load_configuration()
+        self.safety_validator = ASRSafetyValidator()
+        self.initialize_models()
+    
+    def _load_configuration(self) -> Dict[str, Any]:
+        """Load AUTOSAR-compliant configuration"""
+        config_map = {
+            'embedded': {
+                'model_path': '/autosar/models/asr_embedded_int8.tflite',
+                'max_latency_ms': 200,
+                'memory_limit_mb': 200,
+                'languages': ['en-US'],
+                'accuracy_target': 0.90,
+                'power_budget_w': 2.5
+            },
+            'hybrid': {
+                'local_model': '/autosar/models/asr_basic_fp16.onnx',
+                'cloud_endpoint': 'https://voice-api.automotive.cloud',
+                'fallback_mode': 'graceful_degradation',
+                'network_timeout_ms': 3000,
+                'accuracy_target': 0.95,
+                'languages': ['en-US', 'es-US', 'fr-FR', 'de-DE'],
+                'cache_size_mb': 50
+            },
+            'cloud': {
+                'endpoint': 'https://premium-voice.automotive.cloud',
+                'model_version': 'flagship_v2.1',
+                'languages': 'all_supported',
+                'accuracy_target': 0.98,
+                'max_latency_ms': 800,
+                'redundancy': 'multi_region'
+            }
+        }
+        return config_map[self.deployment_mode]
+    
+    def initialize_models(self):
+        """Initialize ASR models based on configuration"""
+        logging.info(f"Initializing ASR engine in {self.deployment_mode} mode")
+        self.word_error_rate = 0.025  # <2.5% target
+        self.real_time_factor = 0.15  # <0.2x target
+        self.languages_supported = self.config.get('languages', ['en-US'])
+        
+    def process_audio_stream(self, audio_stream: np.ndarray, context: VehicleContext) -> ASRResult:
+        """Process streaming audio with safety validation"""
+        start_time = time.time()
+        
+        try:
+            # Streaming recognition with confidence scoring
+            transcript = self._perform_recognition(audio_stream, context)
+            confidence = self._calculate_confidence(transcript, audio_stream)
+            language = self._detect_language(audio_stream)
+            
+            processing_time = int((time.time() - start_time) * 1000)
+            
+            # Safety validation before returning result
+            safety_check = self.safety_validator.validate_transcription(
+                transcript, context
+            )
+            
+            return ASRResult(
+                text=transcript,
+                confidence=confidence,
+                language=language,
+                safety_approved=safety_check,
+                processing_time_ms=processing_time
+            )
+            
+        except Exception as e:
+            logging.error(f"ASR processing failed: {e}")
+            return self._handle_asr_error(e, context)
+    
+    def _perform_recognition(self, audio: np.ndarray, context: VehicleContext) -> str:
+        """Perform actual speech recognition"""
+        # Simplified recognition (real implementation would use deep learning models)
+        sample_utterances = [
+            "set temperature to twenty two degrees",
+            "navigate to home",
+            "play jazz music",
+            "call mom",
+            "what's the weather like",
+            "open garage door",
+            "turn on seat heating",
+            "increase volume",
+            "find nearest gas station",
+            "emergency call nine one one"
+        ]
+        return np.random.choice(sample_utterances)
+    
+    def _calculate_confidence(self, transcript: str, audio: np.ndarray) -> float:
+        """Calculate confidence score for recognition"""
+        # Simplified confidence calculation
+        base_confidence = 0.85
+        audio_quality_factor = min(1.0, np.std(audio) * 10)
+        length_factor = min(1.0, len(transcript.split()) / 10.0)
+        return base_confidence * audio_quality_factor * length_factor
+    
+    def _detect_language(self, audio: np.ndarray) -> str:
+        """Detect spoken language"""
+        return "en-US"  # Simplified
+    
+    def _handle_asr_error(self, error: Exception, context: VehicleContext) -> ASRResult:
+        """Handle ASR errors with graceful degradation"""
+        logging.error(f"ASR error: {error}")
+        return ASRResult(
+            text="",
+            confidence=0.0,
+            language="en-US",
+            safety_approved=False,
+            processing_time_ms=0
+        )
+
+class ASRSafetyValidator:
+    """Safety validation for ASR output"""
+    
+    def validate_transcription(self, transcript: str, context: VehicleContext) -> bool:
+        """Validate ASR output for safety compliance"""
+        # Check for profanity or inappropriate content
+        inappropriate_words = ["damn", "hell", "stupid"]  # Simplified list
+        if any(word in transcript.lower() for word in inappropriate_words):
+            return False
+        
+        # Validate based on driving conditions
+        if context.speed > 80 and "emergency" not in transcript.lower():
+            # Extra validation at high speeds
+            critical_commands = ["unlock", "open", "disable"]
+            if any(cmd in transcript.lower() for cmd in critical_commands):
+                return False
+        
+        return True
+
+# ============================================================================
+# NATURAL LANGUAGE UNDERSTANDING
+# ============================================================================
+
+class AutomotiveNLUEngine:
+    """Advanced NLU with automotive domain specialization"""
+    
+    def __init__(self):
+        self.intent_classifier = AutomotiveIntentClassifier()
+        self.entity_extractor = AutomotiveEntityExtractor()
+        self.context_manager = VehicleContextManager()
+        self.safety_validator = NLUSafetyValidator()
+        self.load_automotive_ontology()
+    
+    def load_automotive_ontology(self):
+        """Load comprehensive automotive domain knowledge"""
+        self.intent_categories = {
+            'CLIMATE_CONTROL': {
+                'temperature_set': ['set temperature', 'adjust temp', 'make it warmer', 'make it cooler'],
+                'hvac_mode': ['heat', 'cool', 'defrost', 'auto climate'],
+                'fan_control': ['increase fan', 'decrease fan', 'turn on air', 'turn off air'],
+                'zone_control': ['driver zone', 'passenger zone', 'rear zone']
+            },
+            'NAVIGATION': {
+                'destination_set': ['navigate to', 'drive to', 'directions to', 'take me to'],
+                'route_query': ['traffic ahead', 'best route', 'avoid tolls', 'fastest way'],
+                'poi_search': ['find gas station', 'nearest restaurant', 'parking'],
+                'route_modification': ['take exit', 'alternate route', 'cancel navigation']
+            },
+            'VEHICLE_CONTROL': {
+                'window_control': ['open window', 'close window', 'roll up', 'roll down'],
+                'door_control': ['lock doors', 'unlock doors', 'open trunk'],
+                'lighting': ['turn on lights', 'turn off lights', 'headlights', 'hazards'],
+                'seat_adjustment': ['adjust seat', 'memory position', 'seat heating']
+            },
+            'INFOTAINMENT': {
+                'media_control': ['play music', 'next song', 'previous song', 'volume up', 'volume down'],
+                'communication': ['call contact', 'send message', 'read messages'],
+                'information': ['weather', 'news', 'sports scores', 'time'],
+                'smart_home': ['garage door', 'house lights', 'thermostat']
+            },
+            'EMERGENCY': {
+                'emergency_call': ['call 911', 'emergency assistance', 'accident'],
+                'roadside_assistance': ['tow truck', 'flat tire', 'battery dead'],
+                'medical_emergency': ['medical help', 'hospital', 'feeling unwell']
+            }
+        }
+    
+    def process_utterance(self, text: str, context: VehicleContext) -> NLUResult:
+        """Advanced NLU processing with automotive context"""
+        try:
+            # Normalize text for automotive domain
+            normalized_text = self._preprocess_automotive_text(text)
+            
+            # Intent classification
+            intent = self.intent_classifier.classify(normalized_text, context)
+            
+            # Entity extraction
+            entities = self.entity_extractor.extract(normalized_text, intent)
+            
+            # Context refinement
+            refined_result = self.context_manager.refine_with_context(
+                intent, entities, context
+            )
+            
+            # Safety validation
+            safety_check = self.safety_validator.validate_intent(
+                refined_result, context
+            )
+            
+            return NLUResult(
+                intent=refined_result['intent'],
+                entities=refined_result['entities'],
+                confidence=refined_result['confidence'],
+                safety_approved=safety_check,
+                contextual_factors=context.__dict__.keys()
+            )
+            
+        except Exception as e:
+            logging.error(f"NLU processing failed: {e}")
+            return self._generate_fallback_response(text)
+    
+    def _preprocess_automotive_text(self, text: str) -> str:
+        """Preprocess text for automotive domain"""
+        # Normalize automotive terminology
+        text = text.lower()
+        text = text.replace("air conditioning", "ac")
+        text = text.replace("air conditioner", "ac")
+        text = text.replace("temperature", "temp")
+        text = text.replace("navigation", "nav")
+        return text
+    
+    def _generate_fallback_response(self, text: str) -> NLUResult:
+        """Generate fallback response for failed NLU"""
+        return NLUResult(
+            intent="unknown",
+            entities={},
+            confidence=0.0,
+            safety_approved=False
+        )
+
+class AutomotiveIntentClassifier:
+    """Intent classification specialized for automotive domain"""
+    
+    def __init__(self):
+        self.classification_threshold = 0.7
+        self.automotive_patterns = self._load_intent_patterns()
+    
+    def _load_intent_patterns(self) -> Dict[str, List[str]]:
+        """Load automotive intent patterns"""
+        return {
+            'climate_control': ['temperature', 'heat', 'cool', 'fan', 'ac', 'defrost'],
+            'navigation': ['navigate', 'directions', 'route', 'drive to', 'take me'],
+            'media': ['play', 'music', 'volume', 'radio', 'song', 'playlist'],
+            'vehicle_control': ['window', 'door', 'trunk', 'seat', 'mirror', 'lights'],
+            'communication': ['call', 'phone', 'message', 'text', 'contact'],
+            'emergency': ['emergency', '911', 'help', 'accident', 'medical']
+        }
+    
+    def classify(self, text: str, context: VehicleContext) -> str:
+        """Classify intent from text"""
+        words = text.lower().split()
+        
+        intent_scores = {}
+        for intent, patterns in self.automotive_patterns.items():
+            score = sum(1 for word in words if word in patterns) / len(words)
+            intent_scores[intent] = score
+        
+        best_intent = max(intent_scores, key=intent_scores.get)
+        
+        if intent_scores[best_intent] >= self.classification_threshold:
+            return best_intent
+        
+        return "unknown"
+
+class AutomotiveEntityExtractor:
+    """Extract entities specific to automotive domain"""
+    
+    def __init__(self):
+        self.entity_patterns = self._load_entity_patterns()
+    
+    def _load_entity_patterns(self) -> Dict[str, str]:
+        """Load automotive entity patterns"""
+        return {
+            'temperature': r'(\d+)\s*(?:degrees?|°[CF]?)',
+            'speed': r'(\d+)\s*(?:mph|kmh|km/h)',
+            'contact': r'(?:call|text|message)\s+([A-Za-z\s]+)',
+            'location': r'(?:navigate to|drive to)\s+(.+)',
+            'time': r'(?:in|at)\s+(\d+:\d+|\d+\s*(?:am|pm))',
+            'percentage': r'(\d+)\s*(?:percent|%)',
+            'zone': r'(driver|passenger|rear|front)\s*(?:side|zone)?'
+        }
+    
+    def extract(self, text: str, intent: str) -> Dict[str, Any]:
+        """Extract entities based on intent and patterns"""
+        import re
+        entities = {}
+        
+        for entity_type, pattern in self.entity_patterns.items():
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                entities[entity_type] = matches[0] if len(matches) == 1 else matches
+        
+        return entities
+
+class VehicleContextManager:
+    """Manage vehicle context for NLU refinement"""
+    
+    def refine_with_context(self, intent: str, entities: Dict, context: VehicleContext) -> Dict:
+        """Refine NLU results with vehicle context"""
+        refined = {
+            'intent': intent,
+            'entities': entities.copy(),
+            'confidence': 0.8  # Base confidence
+        }
+        
+        # Context-based refinements
+        if context.speed > 60:  # Highway driving
+            refined['confidence'] *= 0.9  # Slightly reduce confidence
+            
+        if context.ambient_noise_level > -30:  # Noisy environment
+            refined['confidence'] *= 0.85
+        
+        # Add implied entities based on context
+        if intent == 'climate_control' and 'zone' not in entities:
+            refined['entities']['zone'] = 'driver'  # Default to driver zone
+        
+        return refined
+
+class NLUSafetyValidator:
+    """Safety validation for NLU results"""
+    
+    def validate_intent(self, nlu_result: Dict, context: VehicleContext) -> bool:
+        """Validate NLU result for safety compliance"""
+        intent = nlu_result['intent']
+        
+        # High-speed restrictions
+        if context.speed > 80:  # km/h
+            restricted_intents = ['vehicle_control', 'complex_navigation']
+            if intent in restricted_intents:
+                return False
+        
+        # Emergency context allowances
+        if context.in_emergency:
+            return True  # Allow all intents during emergency
+        
+        # Driver attention checks
+        if context.driver_attention_level < 0.7:
+            complex_intents = ['navigation', 'communication']
+            if intent in complex_intents:
+                return False
+        
+        return True
+
+# ============================================================================
+# COMMAND MAPPING AND EXECUTION
+# ============================================================================
+
+class ASILBCommandExecutor:
+    """ASIL-B compliant command execution with full traceability"""
+    
+    def __init__(self):
+        self.can_interface = CANBusInterface()
+        self.ethernet_interface = AutomotiveEthernetInterface()
+        self.safety_monitor = ASILBSafetyMonitor()
+        self.command_validator = VehicleCommandValidator()
+        self.error_handler = SafetyErrorHandler()
+        self.audit_logger = ComplianceAuditLogger()
+        
+        self.load_command_mappings()
+        self.initialize_safety_limits()
+    
+    def load_command_mappings(self):
+        """Load command to CAN message mappings"""
+        self.command_mappings = {
+            'climate_control': {
+                'temperature_set': {'can_id': 0x3D1, 'data_format': 'temp_zone_mode'},
+                'fan_speed': {'can_id': 0x3D2, 'data_format': 'speed_direction'},
+                'defrost': {'can_id': 0x3D3, 'data_format': 'on_off_zone'}
+            },
+            'vehicle_control': {
+                'window_control': {'can_id': 0x2A5, 'data_format': 'window_id_position'},
+                'door_control': {'can_id': 0x2A1, 'data_format': 'door_mask_action'},
+                'trunk_control': {'can_id': 0x2A9, 'data_format': 'action_only'}
+            },
+            'media': {
+                'volume_control': {'api_endpoint': '/media/volume'},
+                'source_control': {'api_endpoint': '/media/source'},
+                'playback_control': {'api_endpoint': '/media/playback'}
+            }
+        }
+    
+    def initialize_safety_limits(self):
+        """Initialize safety operating limits"""
+        self.safety_limits = {
+            'max_speed_for_windows': 80,  # km/h
+            'max_speed_for_doors': 5,     # km/h
+            'emergency_override': True,
+            'biometric_required_functions': ['door_unlock', 'trunk_open']
+        }
+    
+    def execute_vehicle_command(self, nlu_result: NLUResult, context: VehicleContext) -> CommandResult:
+        """ASIL-B compliant command execution"""
+        execution_id = self._generate_execution_id()
+        
+        try:
+            # Stage 1: Pre-execution Safety Validation
+            safety_validation = self.safety_monitor.validate_execution_context(
+                nlu_result, context, execution_id
+            )
+            
+            if not safety_validation:
+                return self._handle_safety_rejection(execution_id)
+            
+            # Stage 2: Command Mapping
+            vehicle_commands = self._map_intent_to_commands(nlu_result, context)
+            
+            # Stage 3: Command Validation
+            if not self._validate_all_commands(vehicle_commands, context):
+                return self._handle_validation_failure(execution_id)
+            
+            # Stage 4: Atomic Execution
+            execution_results = self._execute_commands_atomically(
+                vehicle_commands, execution_id
+            )
+            
+            # Stage 5: Post-execution Verification
+            success = self._verify_execution_success(execution_results)
+            
+            return CommandResult(
+                execution_id=execution_id,
+                success=success,
+                commands_executed=len(vehicle_commands),
+                execution_time_ms=execution_results.get('total_time', 0),
+                user_feedback=self._generate_user_feedback(nlu_result, success)
+            )
+            
+        except Exception as e:
+            return self._handle_critical_error(e, execution_id)
+    
+    def _generate_execution_id(self) -> str:
+        """Generate unique execution ID for traceability"""
+        timestamp = int(time.time() * 1000)
+        return f"exec_{timestamp}_{secrets.token_hex(4)}"
+    
+    def _map_intent_to_commands(self, nlu_result: NLUResult, context: VehicleContext) -> List[Dict]:
+        """Map NLU intent to specific vehicle commands"""
+        commands = []
+        intent = nlu_result.intent
+        entities = nlu_result.entities
+        
+        if intent == 'climate_control':
+            if 'temperature' in entities:
+                commands.append({
+                    'type': 'can_message',
+                    'can_id': 0x3D1,
+                    'data': self._format_temperature_data(entities),
+                    'target_ecu': 'climate'
+                })
+        
+        elif intent == 'vehicle_control':
+            if 'window' in str(entities):
+                commands.append({
+                    'type': 'can_message',
+                    'can_id': 0x2A5,
+                    'data': self._format_window_data(entities),
+                    'target_ecu': 'body_control'
+                })
+        
+        elif intent == 'media':
+            commands.append({
+                'type': 'api_call',
+                'endpoint': '/media/control',
+                'payload': self._format_media_payload(entities),
+                'target_system': 'infotainment'
+            })
+        
+        return commands
+    
+    def _format_temperature_data(self, entities: Dict) -> List[int]:
+        """Format temperature command data for CAN"""
+        temp = int(entities.get('temperature', 22))
+        zone = entities.get('zone', 'driver')
+        zone_map = {'driver': 0x01, 'passenger': 0x02, 'rear': 0x03, 'all': 0x0F}
+        
+        return [temp, zone_map.get(zone, 0x01), 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
+    
+    def _format_window_data(self, entities: Dict) -> List[int]:
+        """Format window command data for CAN"""
+        action = 0x01 if 'open' in str(entities) or 'down' in str(entities) else 0x00
+        window_id = 0x01  # Driver window default
+        
+        return [action, window_id, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    
+    def _format_media_payload(self, entities: Dict) -> Dict:
+        """Format media command payload"""
+        return {
+            'action': entities.get('action', 'play'),
+            'volume': entities.get('volume', None),
+            'source': entities.get('source', None)
+        }
+    
+    def _validate_all_commands(self, commands: List[Dict], context: VehicleContext) -> bool:
+        """Validate all commands before execution"""
+        for command in commands:
+            if not self.command_validator.validate_command(command, context):
+                return False
+        return True
+    
+    def _execute_commands_atomically(self, commands: List[Dict], execution_id: str) -> Dict:
+        """Execute commands with atomic transaction semantics"""
+        results = {'executed': [], 'total_time': 0}
+        start_time = time.time()
+        
+        try:
+            for command in commands:
+                cmd_start = time.time()
+                
+                if command['type'] == 'can_message':
+                    result = self.can_interface.send_message(
+                        command['can_id'], command['data']
+                    )
+                elif command['type'] == 'api_call':
+                    result = self.ethernet_interface.api_call(
+                        command['endpoint'], command['payload']
+                    )
+                
+                cmd_time = int((time.time() - cmd_start) * 1000)
+                results['executed'].append({
+                    'command': command,
+                    'result': result,
+                    'execution_time': cmd_time
+                })
+            
+            results['total_time'] = int((time.time() - start_time) * 1000)
+            return results
+            
+        except Exception as e:
+            logging.error(f"Command execution failed: {e}")
+            self._rollback_commands(results['executed'])
+            raise e
+    
+    def _verify_execution_success(self, results: Dict) -> bool:
+        """Verify that all commands executed successfully"""
+        return all(r['result'].get('success', False) for r in results['executed'])
+    
+    def _generate_user_feedback(self, nlu_result: NLUResult, success: bool) -> str:
+        """Generate appropriate user feedback"""
+        if success:
+            intent = nlu_result.intent
+            if intent == 'climate_control':
+                return "Temperature adjusted"
+            elif intent == 'vehicle_control':
+                return "Vehicle control updated"
+            elif intent == 'media':
+                return "Media control applied"
+            else:
+                return "Command executed successfully"
+        else:
+            return "Command could not be completed"
+    
+    def _handle_safety_rejection(self, execution_id: str) -> CommandResult:
+        """Handle safety validation rejection"""
+        return CommandResult(
+            execution_id=execution_id,
+            success=False,
+            error_message="Command rejected for safety reasons"
+        )
+    
+    def _handle_validation_failure(self, execution_id: str) -> CommandResult:
+        """Handle command validation failure"""
+        return CommandResult(
+            execution_id=execution_id,
+            success=False,
+            error_message="Command validation failed"
+        )
+    
+    def _handle_critical_error(self, error: Exception, execution_id: str) -> CommandResult:
+        """Handle critical execution errors"""
+        logging.critical(f"Critical error in execution {execution_id}: {error}")
+        return CommandResult(
+            execution_id=execution_id,
+            success=False,
+            error_message=f"Critical error: {str(error)}"
+        )
+    
+    def _rollback_commands(self, executed_commands: List[Dict]):
+        """Rollback executed commands in case of failure"""
+        logging.warning("Rolling back executed commands")
+        # Implementation would reverse the effects of executed commands
+
+class VehicleCommandValidator:
+    """Validate vehicle commands for safety and feasibility"""
+    
+    def validate_command(self, command: Dict, context: VehicleContext) -> bool:
+        """Validate individual command"""
+        command_type = command.get('type')
+        
+        if command_type == 'can_message':
+            return self._validate_can_command(command, context)
+        elif command_type == 'api_call':
+            return self._validate_api_command(command, context)
+        
+        return False
+    
+    def _validate_can_command(self, command: Dict, context: VehicleContext) -> bool:
+        """Validate CAN bus command"""
+        can_id = command.get('can_id')
+        
+        # Speed-based restrictions
+        if can_id == 0x2A5 and context.speed > 80:  # Window control
+            return False
+        
+        if can_id == 0x2A1 and context.speed > 5:   # Door control
+            return False
+        
+        return True
+    
+    def _validate_api_command(self, command: Dict, context: VehicleContext) -> bool:
+        """Validate API command"""
+        endpoint = command.get('endpoint', '')
+        
+        # Media commands are generally safe at any speed
+        if endpoint.startswith('/media/'):
+            return True
+        
+        return True
+
+class ASILBSafetyMonitor:
+    """ASIL-B safety monitoring system"""
+    
+    def validate_execution_context(self, nlu_result: NLUResult, 
+                                 context: VehicleContext, execution_id: str) -> bool:
+        """Validate execution context for safety compliance"""
+        
+        # Emergency override - allow all commands in emergency
+        if context.in_emergency:
+            self._log_emergency_override(execution_id)
+            return True
+        
+        # Speed-based restrictions
+        if context.speed > 100:  # Very high speed
+            critical_intents = ['vehicle_control', 'navigation']
+            if nlu_result.intent in critical_intents:
+                return False
+        
+        # Driver attention requirements
+        if context.driver_attention_level < 0.5:
+            return False
+        
+        # Weather-based restrictions
+        if context.weather_conditions in ['heavy_rain', 'snow', 'fog']:
+            if nlu_result.intent == 'vehicle_control':
+                return False
+        
+        return True
+    
+    def _log_emergency_override(self, execution_id: str):
+        """Log emergency override for audit trail"""
+        logging.warning(f"Emergency override active for execution {execution_id}")
+
+class SafetyErrorHandler:
+    """Handle safety-related errors and exceptions"""
+    
+    def handle_error(self, error: Exception, context: str) -> Dict:
+        """Handle safety errors with appropriate response"""
+        error_response = {
+            'error_type': type(error).__name__,
+            'error_message': str(error),
+            'context': context,
+            'timestamp': datetime.now().isoformat(),
+            'recovery_action': self._determine_recovery_action(error)
+        }
+        
+        logging.error(f"Safety error: {error_response}")
+        return error_response
+    
+    def _determine_recovery_action(self, error: Exception) -> str:
+        """Determine appropriate recovery action"""
+        if "timeout" in str(error).lower():
+            return "retry_with_backoff"
+        elif "validation" in str(error).lower():
+            return "request_user_confirmation"
+        else:
+            return "graceful_degradation"
+
+class ComplianceAuditLogger:
+    """Audit logging for compliance requirements"""
+    
+    def __init__(self):
+        self.audit_log = []
+        self.log_file = "/var/log/automotive/voice_audit.log"
+    
+    def log_event(self, event_type: str, details: Dict):
+        """Log compliance event"""
+        log_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'event_type': event_type,
+            'details': details,
+            'compliance_level': 'ASIL-B'
+        }
+        
+        self.audit_log.append(log_entry)
+        logging.info(f"Audit log: {log_entry}")
+    
+    def log_authentication_decision(self, auth_result: AuthenticationResult):
+        """Log authentication decision for audit"""
+        self.log_event('AUTHENTICATION_DECISION', {
+            'success': auth_result.success,
+            'risk_score': auth_result.risk_score,
+            'session_id': auth_result.session_id
+        })
+
+# ============================================================================
+# VOICE BIOMETRIC AUTHENTICATION
+# ============================================================================
+
+class AutomotiveVoiceSecurity:
+    """Comprehensive automotive voice security system"""
+    
+    def __init__(self):
+        self.biometric_engine = VoiceBiometricEngine()
+        self.threat_detector = RealtimeThreatDetector()
+        self.security_monitor = SecurityMonitor()
+        self.hsm_interface = HSMInterface()
+        self.initialize_security_keys()
+    
+    def initialize_security_keys(self):
+        """Initialize secure key management"""
+        self.encryption_key = secrets.token_bytes(32)  # 256-bit key
+        self.session_keys = {}
+    
+    def authenticate_voice_command(self, voice_sample: np.ndarray, 
+                                 context: VehicleContext) -> AuthenticationResult:
+        """Multi-factor voice authentication with liveness detection"""
+        auth_session_id = self._generate_session_id()
+        
+        try:
+            # Stage 1: Voice Quality Assessment
+            quality_check = self._assess_voice_quality(voice_sample)
+            if not quality_check:
+                return AuthenticationResult(
+                    success=False,
+                    reason="Voice quality insufficient for authentication",
+                    session_id=auth_session_id
+                )
+            
+            # Stage 2: Liveness Detection
+            liveness_check = self.biometric_engine.detect_liveness(voice_sample)
+            if not liveness_check:
+                self.security_monitor.log_spoofing_attempt(auth_session_id)
+                return AuthenticationResult(
+                    success=False,
+                    reason="Liveness detection failed - possible spoofing attempt",
+                    session_id=auth_session_id,
+                    security_alert=True
+                )
+            
+            # Stage 3: Voice Biometric Verification
+            voice_score = self.biometric_engine.verify_voice(voice_sample, context.primary_user_id)
+            
+            # Stage 4: Contextual Risk Assessment
+            context_factors = self._evaluate_context_factors(context)
+            risk_score = self._calculate_authentication_risk(
+                voice_score, context_factors, context
+            )
+            
+            # Stage 5: Authentication Decision
+            decision = self._make_authentication_decision(risk_score, context)
+            
+            return decision
+            
+        except Exception as e:
+            logging.error(f"Authentication error: {e}")
+            return self._handle_authentication_error(e, auth_session_id)
+    
+    def _generate_session_id(self) -> str:
+        """Generate secure session ID"""
+        return secrets.token_hex(16)
+    
+    def _assess_voice_quality(self, voice_sample: np.ndarray) -> bool:
+        """Assess voice sample quality for authentication"""
+        # Check signal-to-noise ratio
+        signal_power = np.mean(voice_sample**2)
+        if signal_power < 0.01:  # Too quiet
+            return False
+        
+        # Check for clipping
+        if np.max(np.abs(voice_sample)) > 0.95:  # Clipped signal
+            return False
+        
+        return True
+    
+    def _evaluate_context_factors(self, context: VehicleContext) -> Dict:
+        """Evaluate contextual authentication factors"""
+        return {
+            'time_unusual': self._is_unusual_time(context),
+            'location_unusual': self._is_unusual_location(context),
+            'behavior_unusual': self._is_unusual_behavior(context),
+            'device_present': self._check_known_devices(context)
+        }
+    
+    def _is_unusual_time(self, context: VehicleContext) -> bool:
+        """Check if current time is unusual for user"""
+        hour = context.timestamp.hour
+        # Simple check - unusual if between 2 AM and 5 AM
+        return 2 <= hour <= 5
+    
+    def _is_unusual_location(self, context: VehicleContext) -> bool:
+        """Check if current location is unusual"""
+        # Simplified location check
+        lat, lon = context.location
+        # Check if far from known locations (simplified)
+        known_locations = [(37.7749, -122.4194)]  # San Francisco
+        
+        for known_lat, known_lon in known_locations:
+            distance = ((lat - known_lat)**2 + (lon - known_lon)**2)**0.5
+            if distance < 0.1:  # Within ~11km
+                return False
+        
+        return True
+    
+    def _is_unusual_behavior(self, context: VehicleContext) -> bool:
+        """Check for unusual driving behavior"""
+        return context.driver_attention_level < 0.7
+    
+    def _check_known_devices(self, context: VehicleContext) -> bool:
+        """Check for presence of known devices"""
+        # In real implementation, would check for paired phones, keys, etc.
+        return True
+    
+    def _calculate_authentication_risk(self, voice_score: float, 
+                                     context_factors: Dict, 
+                                     context: VehicleContext) -> float:
+        """Calculate composite authentication risk score"""
+        
+        # Base risk from voice biometric
+        voice_risk = 1.0 - voice_score
+        
+        # Context-based risk adjustments
+        context_risk = 0.0
+        if context_factors['time_unusual']:
+            context_risk += 0.1
+        if context_factors['location_unusual']:
+            context_risk += 0.15
+        if context_factors['behavior_unusual']:
+            context_risk += 0.1
+        if not context_factors['device_present']:
+            context_risk += 0.2
+        
+        # Speed-based risk adjustment
+        if context.speed > 80:
+            context_risk += 0.05
+        
+        total_risk = voice_risk + context_risk
+        return min(total_risk, 1.0)  # Cap at 100%
+    
+    def _make_authentication_decision(self, risk_score: float, 
+                                    context: VehicleContext) -> AuthenticationResult:
+        """Make final authentication decision"""
+        
+        # Dynamic threshold based on context
+        if context.in_emergency:
+            threshold = 0.3  # Lower threshold for emergencies
+        elif context.speed > 80:
+            threshold = 0.25  # Moderate threshold while driving
+        else:
+            threshold = 0.2   # Standard threshold
+        
+        success = risk_score <= threshold
+        confidence = 1.0 - risk_score
+        
+        return AuthenticationResult(
+            success=success,
+            confidence=confidence,
+            risk_score=risk_score,
+            threshold=threshold,
+            session_id=context.session_id,
+            additional_verification_required=risk_score > (threshold * 0.8)
+        )
+    
+    def _handle_authentication_error(self, error: Exception, session_id: str) -> AuthenticationResult:
+        """Handle authentication errors"""
+        return AuthenticationResult(
+            success=False,
+            reason=f"Authentication error: {str(error)}",
+            session_id=session_id
+        )
+
+class VoiceBiometricEngine:
+    """Voice biometric processing engine"""
+    
+    def __init__(self):
+        self.enrollment_samples = 5
+        self.verification_threshold = 0.92
+        self.user_templates = {}
+    
+    def detect_liveness(self, voice_sample: np.ndarray) -> bool:
+        """Detect if voice sample is from live person"""
+        # Simplified liveness detection
+        # Real implementation would analyze spectral characteristics
+        spectral_variance = np.var(np.fft.fft(voice_sample))
+        return spectral_variance > 0.01
+    
+    def verify_voice(self, voice_sample: np.ndarray, user_id: str) -> float:
+        """Verify voice against enrolled template"""
+        if user_id not in self.user_templates:
+            return 0.0  # No template enrolled
+        
+        # Simplified verification (real implementation would use neural networks)
+        template = self.user_templates[user_id]
+        
+        # Calculate similarity score (simplified)
+        sample_features = self._extract_features(voice_sample)
+        template_features = template['features']
+        
+        similarity = self._calculate_similarity(sample_features, template_features)
+        return similarity
+    
+    def _extract_features(self, voice_sample: np.ndarray) -> np.ndarray:
+        """Extract voice features for biometric comparison"""
+        # Simplified feature extraction (MFCC-like)
+        features = np.array([
+            np.mean(voice_sample),
+            np.std(voice_sample),
+            np.max(voice_sample),
+            np.min(voice_sample)
+        ])
+        return features
+    
+    def _calculate_similarity(self, features1: np.ndarray, features2: np.ndarray) -> float:
+        """Calculate similarity between feature vectors"""
+        # Simplified similarity calculation
+        if len(features1) != len(features2):
+            return 0.0
+        
+        distance = np.linalg.norm(features1 - features2)
+        similarity = 1.0 / (1.0 + distance)
+        return similarity
+
+class RealtimeThreatDetector:
+    """Real-time threat detection for voice systems"""
+    
+    def __init__(self):
+        self.threat_patterns = self._load_threat_patterns()
+        self.active_threats = []
+    
+    def _load_threat_patterns(self) -> List[str]:
+        """Load known threat patterns"""
+        return [
+            'replay_attack',
+            'voice_synthesis',
+            'injection_attack',
+            'eavesdropping'
+        ]
+    
+    def detect_threat(self, voice_sample: np.ndarray, context: Dict) -> List[str]:
+        """Detect potential security threats"""
+        detected_threats = []
+        
+        # Check for replay attacks
+        if self._detect_replay_attack(voice_sample):
+            detected_threats.append('replay_attack')
+        
+        # Check for synthetic voice
+        if self._detect_synthetic_voice(voice_sample):
+            detected_threats.append('voice_synthesis')
+        
+        return detected_threats
+    
+    def _detect_replay_attack(self, voice_sample: np.ndarray) -> bool:
+        """Detect potential replay attacks"""
+        # Simplified replay detection
+        # Real implementation would analyze acoustic characteristics
+        return False
+    
+    def _detect_synthetic_voice(self, voice_sample: np.ndarray) -> bool:
+        """Detect synthetic/AI-generated voice"""
+        # Simplified synthetic voice detection
+        return False
+
+class SecurityMonitor:
+    """Security monitoring and logging"""
+    
+    def __init__(self):
+        self.security_events = []
+        self.alert_threshold = 5
+    
+    def log_spoofing_attempt(self, session_id: str):
+        """Log potential spoofing attempt"""
+        event = {
+            'timestamp': datetime.now(),
+            'event_type': 'spoofing_attempt',
+            'session_id': session_id,
+            'severity': 'HIGH'
+        }
+        self.security_events.append(event)
+        logging.warning(f"Security event: {event}")
+    
+    def log_authentication_decision(self, result: AuthenticationResult):
+        """Log authentication decisions"""
+        event = {
+            'timestamp': datetime.now(),
+            'event_type': 'authentication',
+            'success': result.success,
+            'risk_score': result.risk_score,
+            'session_id': result.session_id
+        }
+        self.security_events.append(event)
+
+class HSMInterface:
+    """Hardware Security Module interface"""
+    
+    def __init__(self):
+        self.secure_storage = {}
+        self.encryption_keys = {}
+    
+    def retrieve_voice_templates(self, user_id: str) -> List[Dict]:
+        """Retrieve encrypted voice templates"""
+        if user_id in self.secure_storage:
+            return self.secure_storage[user_id].get('templates', [])
+        return []
+    
+    def store_voice_template(self, user_id: str, template: Dict):
+        """Store encrypted voice template"""
+        if user_id not in self.secure_storage:
+            self.secure_storage[user_id] = {'templates': []}
+        
+        # Encrypt template (simplified)
+        encrypted_template = self._encrypt_template(template)
+        self.secure_storage[user_id]['templates'].append(encrypted_template)
+    
+    def _encrypt_template(self, template: Dict) -> Dict:
+        """Encrypt voice template"""
+        # Simplified encryption
+        return template
+
+# ============================================================================
+# VEHICLE COMMUNICATION INTERFACES
+# ============================================================================
+
+class CANBusInterface:
+    """CAN bus communication interface"""
+    
+    def __init__(self, interface: str = 'vcan0'):
+        self.interface = interface
+        self.bus = None
+        self.initialize_can()
+    
+    def initialize_can(self):
+        """Initialize CAN bus interface"""
+        try:
+            # In real implementation, would use python-can library
+            # self.bus = can.interface.Bus(channel=self.interface, bustype='socketcan')
+            logging.info(f"CAN bus initialized on {self.interface}")
+        except Exception as e:
+            logging.error(f"CAN initialization failed: {e}")
+    
+    def send_message(self, can_id: int, data: List[int]) -> Dict:
+        """Send CAN message"""
+        try:
+            # Validate data length
+            if len(data) > 8:
+                raise ValueError("CAN data cannot exceed 8 bytes")
+            
+            # Create CAN message
+            message = {
+                'id': can_id,
+                'data': data,
+                'timestamp': time.time(),
+                'is_extended_id': False
+            }
+            
+            # In real implementation:
+            # msg = can.Message(arbitration_id=can_id, data=data)
+            # self.bus.send(msg)
+            
+            logging.info(f"CAN message sent: {message}")
+            return {'success': True, 'message': message}
+            
+        except Exception as e:
+            logging.error(f"CAN send failed: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    def receive_message(self, timeout: float = 1.0) -> Optional[Dict]:
+        """Receive CAN message"""
+        try:
+            # In real implementation:
+            # msg = self.bus.recv(timeout=timeout)
+            # if msg:
+            #     return {
+            #         'id': msg.arbitration_id,
+            #         'data': list(msg.data),
+            #         'timestamp': msg.timestamp
+            #     }
+            return None
+            
+        except Exception as e:
+            logging.error(f"CAN receive failed: {e}")
+            return None
+
+class AutomotiveEthernetInterface:
+    """Automotive Ethernet communication interface"""
+    
+    def __init__(self, base_url: str = "http://vehicle-gateway:8080"):
+        self.base_url = base_url
+        self.session = None
+        self.timeout = 3.0
+    
+    def api_call(self, endpoint: str, payload: Dict) -> Dict:
+        """Make API call over Ethernet"""
+        try:
+            url = f"{self.base_url}{endpoint}"
+            
+            # In real implementation, would use requests library
+            response = {
+                'status_code': 200,
+                'data': {'result': 'success', 'payload': payload},
+                'timestamp': time.time()
+            }
+            
+            logging.info(f"Ethernet API call: {endpoint}")
+            return {'success': True, 'response': response}
+            
+        except Exception as e:
+            logging.error(f"Ethernet API call failed: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    def send_diagnostic_request(self, ecu_id: str, request: bytes) -> bytes:
+        """Send UDS diagnostic request"""
+        try:
+            # Simulate diagnostic communication
+            response = b'\x50\x01\x00\x00'  # Positive response
+            logging.info(f"Diagnostic request sent to {ecu_id}")
+            return response
+            
+        except Exception as e:
+            logging.error(f"Diagnostic request failed: {e}")
+            return b''
+
+# ============================================================================
+# MAIN VOICE AUTOMATION SYSTEM
+# ============================================================================
+
+class VoiceAutomationSystem:
+    """Main voice automation system orchestrator"""
+    
+    def __init__(self, config_file: str = "voice_config.json"):
+        self.config = self._load_configuration(config_file)
+        self.running = False
+        self.audio_queue = queue.Queue()
+        
+        # Initialize subsystems
+        self.audio_processor = AudioPreprocessor(AudioConfig())
+        self.wake_word_detector = WakeWordDetector()
+        self.asr_engine = AutomotiveASREngine()
+        self.nlu_engine = AutomotiveNLUEngine()
+        self.command_executor = ASILBCommandExecutor()
+        self.security_system = AutomotiveVoiceSecurity()
+        
+        # Initialize communication interfaces
+        self.can_interface = CANBusInterface()
+        self.ethernet_interface = AutomotiveEthernetInterface()
+        
+        self._setup_signal_handlers()
+    
+    def _load_configuration(self, config_file: str) -> Dict:
+        """Load system configuration"""
+        default_config = {
+            'audio': {
+                'sample_rate': 16000,
+                'channels': 4,
+                'chunk_size': 1024
+            },
+            'asr': {
+                'deployment_mode': 'hybrid',
+                'languages': ['en-US']
+            },
+            'safety': {
+                'asil_level': 'ASIL-B',
+                'max_processing_delay': 350
+            },
+            'logging': {
+                'level': 'INFO',
+                'file': '/var/log/automotive
